@@ -8,7 +8,9 @@
 //  8 on_ground, 9 velocity (m/s), 10 true_track (deg), 11 vertical_rate (m/s),
 //  13 geo_altitude (m), 14 squawk.
 
-const BASE = 'https://opensky-network.org/api';
+// In sviluppo passiamo dal proxy Vite (/osky) per evitare problemi di CORS;
+// in produzione si chiama direttamente l'API pubblica.
+const BASE = import.meta.env.DEV ? '/osky' : 'https://opensky-network.org/api';
 
 function parseState(s) {
   return {

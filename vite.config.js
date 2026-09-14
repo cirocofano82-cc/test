@@ -9,5 +9,16 @@ export default defineConfig({
   server: {
     port: 5173,
     host: true,
+    // Proxy di sviluppo verso OpenSky: la richiesta parte dal server Vite,
+    // così il browser non incappa in errori CORS chiamando l'API dal localhost.
+    // /osky/states/all -> https://opensky-network.org/api/states/all
+    proxy: {
+      '/osky': {
+        target: 'https://opensky-network.org',
+        changeOrigin: true,
+        secure: true,
+        rewrite: (p) => p.replace(/^\/osky/, '/api'),
+      },
+    },
   },
 });

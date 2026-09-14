@@ -18,6 +18,8 @@ export function useFlightPolling(bbox, intervalMs = 15000) {
     async function tick() {
       const b = bboxRef.current;
       if (!b) return;
+      // Non consumare quota quando la scheda è in background.
+      if (typeof document !== 'undefined' && document.hidden) return;
       controller = new AbortController();
       setFetchStatus('loading');
       try {
