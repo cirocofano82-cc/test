@@ -288,6 +288,8 @@ export default function FrontalView() {
   // Offset di sguardo controllato dal mouse (trascinamento tasto sinistro):
   // ruota la visuale rispetto alla direzione di volo, senza fermare la sim.
   const lookRef = useRef({ yaw: 0, pitch: 0, dragging: false });
+  // Zoom ottico: campo visivo (FOV) in radiani, regolato con la rotellina.
+  const zoomRef = useRef({ fov: Math.PI / 3 }); // ~60° default
 
   useEffect(() => {
     flightRef.current = flight;
@@ -395,6 +397,16 @@ export default function FrontalView() {
           Math.min(70, lookRef.current.pitch - dy * SENS)
         );
       }, Cesium.ScreenSpaceEventType.MOUSE_MOVE);
+
+      // Rotellina: zoom ottico (restringe/allarga il FOV). FOV piccolo = zoom
+      // in. Limiti ~12°–90°.
+      handler.setInputAction((delta) => {
+        const factor = delta > 0 ? 0.9 : 1.1; // su = zoom in
+        zoomRef.current.fov = Math.max(
+          Cesium.Math.toRadians(12),
+          Math.min(Cesium.Math.toRadians(90), zoomRef.current.fov * factor)
+        );
+      }, Cesium.ScreenSpaceEventType.WHEEL);
     }
     attach();
 
@@ -417,6 +429,7 @@ export default function FrontalView() {
   const startSim = (snapshot) => {
     smoothPoseRef.current = null;
     lookRef.current = { yaw: 0, pitch: 0, dragging: false };
+    zoomRef.current = { fov: Math.PI / 3 };
     let cancelled = false;
     findApproach(snapshot.lat, snapshot.lon, snapshot.heading, snapshot.altM)
       .then((rw) => {
@@ -545,6 +558,11 @@ export default function FrontalView() {
         const look = lookRef.current;
         const finalHeading = sp.heading + look.yaw;
         const finalPitch = Math.max(-89, Math.min(45, sp.pitch + look.pitch));
+
+        // Zoom ottico: applica il FOV corrente.
+        if (viewer.camera.frustum && 'fov' in viewer.camera.frustum) {
+          viewer.camera.frustum.fov = zoomRef.current.fov;
+        }
 
         viewer.camera.setView({
           destination: Cesium.Cartesian3.fromDegrees(pose.lon, pose.lat, pose.alt),
