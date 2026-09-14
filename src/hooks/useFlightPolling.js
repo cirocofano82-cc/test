@@ -20,6 +20,8 @@ export function useFlightPolling(bbox, intervalMs = 15000) {
       if (!b) return;
       // Non consumare quota quando la scheda è in background.
       if (typeof document !== 'undefined' && document.hidden) return;
+      // In visuale frontale la simulazione è autonoma: non scarichiamo dati.
+      if (useStore.getState().frontalOpen) return;
       controller = new AbortController();
       setFetchStatus('loading');
       try {

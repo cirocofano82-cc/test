@@ -147,27 +147,135 @@ function computePose(state, runway, aimMode) {
   };
 }
 
+// Etichette e colori (riuso classi phase-badge) per le fasi della simulazione.
+const SIM_PHASE = {
+  approach: { label: 'Avvicinamento', badge: 'descent' },
+  rollout: { label: 'Atterraggio', badge: 'ground' },
+  stopped: { label: 'Atterrato', badge: 'ground' },
+  cruise: { label: 'Crociera', badge: 'cruise' },
+};
+
+// Costruisce lo stato iniziale della simulazione da uno snapshot dell'aereo.
+// Con pista: avvicinamento con discesa proporzionale alla distanza (atterra
+// esattamente sulla soglia). Senza pista: crociera in linea retta.
+function makeSim(snapshot, runway) {
+  if (runway) {
+    const elevM = runway.thr.elevM || 0;
+    let startAlt = snapshot.altM;
+    if (startAlt == null || startAlt < elevM + 30) startAlt = elevM + 300;
+    let speedMs = snapshot.speedMs;
+    if (!speedMs || speedMs < 30) speedMs = 70; // ~135 kt di default
+    const startDist = Math.max(
+      haversineKm(snapshot.lat, snapshot.lon, runway.thr.lat, runway.thr.lon) *
+        1000,
+      300
+    );
+    return {
+      phase: 'approach',
+      lat: snapshot.lat,
+      lon: snapshot.lon,
+      altM: startAlt,
+      heading: snapshot.heading,
+      speedMs,
+      vspeed: 0,
+      thrLat: runway.thr.lat,
+      thrLon: runway.thr.lon,
+      elevM,
+      headingT: runway.headingT ?? snapshot.heading,
+      startDist,
+      startAlt,
+    };
+  }
+  return {
+    phase: 'cruise',
+    lat: snapshot.lat,
+    lon: snapshot.lon,
+    altM: snapshot.altM ?? 1500,
+    heading: snapshot.heading,
+    speedMs: snapshot.speedMs || 120,
+    vspeed: snapshot.vrate || 0,
+    vrate: snapshot.vrate || 0,
+  };
+}
+
+// Avanza la simulazione di dt secondi (muta l'oggetto sim).
+function advanceSim(sim, dt) {
+  const prevAlt = sim.altM;
+  if (sim.phase === 'approach') {
+    const step = sim.speedMs * dt;
+    let dist = haversineKm(sim.lat, sim.lon, sim.thrLat, sim.thrLon) * 1000;
+    if (dist <= Math.max(step, 30)) {
+      // Tocca la soglia: touchdown, passa al rullaggio.
+      sim.lat = sim.thrLat;
+      sim.lon = sim.thrLon;
+      sim.altM = sim.elevM;
+      sim.heading = sim.headingT;
+      sim.phase = 'rollout';
+    } else {
+      const bng = bearing(sim.lat, sim.lon, sim.thrLat, sim.thrLon);
+      sim.heading = lerpAngleDeg(sim.heading, bng, 0.06); // allineamento dolce
+      const [lat, lon] = destinationPoint(sim.lat, sim.lon, sim.heading, step);
+      sim.lat = lat;
+      sim.lon = lon;
+      // Discesa proporzionale alla distanza: quota = elev quando dist = 0.
+      dist = haversineKm(sim.lat, sim.lon, sim.thrLat, sim.thrLon) * 1000;
+      const frac = Math.min(1, Math.max(0, dist / sim.startDist));
+      sim.altM = sim.elevM + (sim.startAlt - sim.elevM) * frac;
+    }
+  } else if (sim.phase === 'rollout') {
+    sim.heading = lerpAngleDeg(sim.heading, sim.headingT, 0.1);
+    sim.speedMs = Math.max(0, sim.speedMs - 3.0 * dt); // decelerazione
+    const [lat, lon] = destinationPoint(
+      sim.lat,
+      sim.lon,
+      sim.heading,
+      sim.speedMs * dt
+    );
+    sim.lat = lat;
+    sim.lon = lon;
+    sim.altM = sim.elevM;
+    if (sim.speedMs < 3) sim.phase = 'stopped';
+  } else if (sim.phase === 'cruise') {
+    const [lat, lon] = destinationPoint(
+      sim.lat,
+      sim.lon,
+      sim.heading,
+      sim.speedMs * dt
+    );
+    sim.lat = lat;
+    sim.lon = lon;
+    sim.altM = Math.max(0, sim.altM + (sim.vrate || 0) * dt);
+  }
+  // 'stopped': nessun movimento.
+  sim.vspeed = dt > 0 ? (sim.altM - prevAlt) / dt : 0;
+}
+
 export default function FrontalView() {
   const flight = useSelectedFlight();
   const closeFrontal = useStore((s) => s.closeFrontal);
+  const frontalOpen = useStore((s) => s.frontalOpen);
+
   const viewerRef = useRef(null);
   const rwEntitiesRef = useRef([]);
   const [runway, setRunway] = useState(null);
   const [aimMode, setAimMode] = useState('runway'); // 'runway' | 'heading'
-  // Pista "sintetica" (striscia disegnata) disattivata di default: così si
-  // vede la pista reale del satellite. Attivabile col toggle.
   const [showSynthetic, setShowSynthetic] = useState(false);
+  // Valori mostrati nell'HUD, aggiornati ~5 volte/s dalla simulazione.
+  const [simHud, setSimHud] = useState(null);
 
-  // Refs letti dal loop di animazione (per avere sempre i valori aggiornati
-  // senza ri-registrare il listener a ogni cambio).
-  const frontalOpen = useStore((s) => s.frontalOpen);
-
-  const baseRef = useRef(null); // stato dell'ultimo dato reale + timestamp
-  const smoothRef = useRef(null); // posizione mostrata, per correzione morbida
-  const smoothPoseRef = useRef(null); // heading/pitch mostrati, per rotazione morbida
+  const flightRef = useRef(flight); // ultimo aereo selezionato (per lo snapshot)
+  const snapshotRef = useRef(null); // stato congelato all'apertura (per "Riavvia")
+  const simRef = useRef(null); // simulazione in corso
+  const smoothPoseRef = useRef(null); // heading/pitch mostrati (rotazione morbida)
+  const lastFrameRef = useRef(0); // timestamp frame precedente (per dt)
+  const lastHudRef = useRef(0); // throttle aggiornamento HUD
   const runwayRef = useRef(null);
   const aimModeRef = useRef(aimMode);
   const openRef = useRef(frontalOpen);
+
+  useEffect(() => {
+    flightRef.current = flight;
+  }, [flight]);
   useEffect(() => {
     runwayRef.current = runway;
   }, [runway]);
@@ -178,78 +286,21 @@ export default function FrontalView() {
     openRef.current = frontalOpen;
   }, [frontalOpen]);
 
-  // Alla riapertura: ridimensiona il viewer (l'elemento era nascosto) e
-  // azzera lo smoothing così la vista si aggancia subito all'aereo corrente.
-  useEffect(() => {
-    if (!frontalOpen) return;
-    smoothRef.current = null;
-    smoothPoseRef.current = null;
-    const viewer = viewerRef.current?.cesiumElement;
-    if (viewer) {
-      viewer.resize();
-      viewer.scene.requestRender();
-    }
-  }, [frontalOpen]);
-
-  // A ogni nuovo dato reale aggiorna la "base" da cui estrapolare il moto.
-  // Se il dato è identico al precedente (OpenSky a volte ripete lo stesso
-  // state vector tra due poll), NON resettiamo: continuiamo a estrapolare
-  // senza far tornare indietro la camera.
-  useEffect(() => {
-    if (!flight) {
-      baseRef.current = null;
-      smoothRef.current = null;
-      return;
-    }
-    const prev = baseRef.current;
-    const unchanged =
-      prev &&
-      prev.lat === flight.lat &&
-      prev.lon === flight.lon &&
-      prev.timePos === (flight.timePosition ?? null);
-    if (unchanged) return;
-
-    // Cambio aereo o salto grande: azzera lo smoothing per non "planare"
-    // attraverso la mappa da una posizione all'altra.
-    if (prev && haversineKm(prev.lat, prev.lon, flight.lat, flight.lon) > 3) {
-      smoothRef.current = null;
-    }
-
-    baseRef.current = {
-      lat: flight.lat,
-      lon: flight.lon,
-      altM: flight.geoAltitude ?? flight.baroAltitude ?? null,
-      heading: flight.heading ?? 0,
-      vMs: flight.velocity ?? 0, // m/s
-      vrate: flight.verticalRate ?? 0, // m/s
-      phaseKey: flightPhase(flight).key,
-      timePos: flight.timePosition ?? null,
-      t0: performance.now(),
-    };
-  }, [flight]);
-
-  // Setup iniziale del viewer: imagery + (se disponibile) terreno reale.
-  // Attende che il viewer Cesium sia pronto (il ref può non esserlo al primo
-  // giro di effect) prima di configurare l'imagery.
+  // Setup del viewer: imagery + (se disponibile) terreno reale. Attende che
+  // il viewer Cesium sia pronto prima di configurarlo.
   useEffect(() => {
     let disposed = false;
-
     function init() {
       const viewer = viewerRef.current?.cesiumElement;
       if (!viewer || !viewer.scene) {
         if (!disposed) requestAnimationFrame(init);
         return;
       }
-
       viewer.imageryLayers.removeAll();
       setupImagery(viewer);
-      // Illuminazione disattivata: con l'ombra notturna il terreno può
-      // apparire scuro/uniforme. Così l'imagery è sempre a piena luminosità.
       viewer.scene.globe.enableLighting = false;
       viewer.scene.skyAtmosphere.show = true;
-      // Colore di base del globo mentre i tile caricano (non blu oceano).
       viewer.scene.globe.baseColor = Cesium.Color.fromCssColorString('#2a2f36');
-
       (async () => {
         if (!ION_TOKEN) return;
         try {
@@ -260,46 +311,84 @@ export default function FrontalView() {
         }
       })();
     }
-
     init();
     return () => {
       disposed = true;
     };
   }, []);
 
-  // Rileva la pista in avvicinamento quando cambiano i dati dell'aereo
-  // (solo a vista aperta, per non lavorare inutilmente quando è nascosta).
-  useEffect(() => {
-    if (!flight || !frontalOpen) return;
+  // Avvio della simulazione: quando "salgo sull'aereo" (apertura vista),
+  // congelo lo stato attuale, rilevo la pista e faccio partire la simulazione
+  // autonoma. Da qui in poi NON si usano più dati reali.
+  const startSim = (snapshot) => {
+    smoothPoseRef.current = null;
     let cancelled = false;
-    const altM = flight.geoAltitude ?? flight.baroAltitude ?? null;
-    findApproach(flight.lat, flight.lon, flight.heading, altM)
-      .then((r) => {
-        if (!cancelled) setRunway(r);
+    findApproach(snapshot.lat, snapshot.lon, snapshot.heading, snapshot.altM)
+      .then((rw) => {
+        if (cancelled) return;
+        setRunway(rw);
+        simRef.current = makeSim(snapshot, rw);
+        lastFrameRef.current = performance.now();
+        setSimHud({
+          altM: simRef.current.altM,
+          speedMs: simRef.current.speedMs,
+          vspeed: 0,
+          phase: simRef.current.phase,
+        });
       })
       .catch(() => {
-        if (!cancelled) setRunway(null);
+        if (cancelled) return;
+        setRunway(null);
+        simRef.current = makeSim(snapshot, null);
+        lastFrameRef.current = performance.now();
       });
     return () => {
       cancelled = true;
     };
-  }, [flight, frontalOpen]);
+  };
 
-  // Disegna la pista sintetica solo se attivata; altrimenti resta la pista
-  // reale del satellite, senza sovrapposizioni.
+  useEffect(() => {
+    if (!frontalOpen) {
+      simRef.current = null;
+      setSimHud(null);
+      return;
+    }
+    const viewer = viewerRef.current?.cesiumElement;
+    if (viewer) {
+      viewer.resize();
+      viewer.scene.requestRender();
+    }
+    const f = flightRef.current;
+    if (!f) return;
+    const snapshot = {
+      lat: f.lat,
+      lon: f.lon,
+      altM: f.geoAltitude ?? f.baroAltitude ?? null,
+      heading: f.heading ?? 0,
+      speedMs: f.velocity ?? 0,
+      vrate: f.verticalRate ?? 0,
+    };
+    snapshotRef.current = snapshot;
+    return startSim(snapshot);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [frontalOpen]);
+
+  // Riavvia la simulazione dallo snapshot iniziale.
+  const restart = () => {
+    if (snapshotRef.current) startSim(snapshotRef.current);
+  };
+
+  // Disegna la pista sintetica solo se attivata.
   useEffect(() => {
     const viewer = viewerRef.current?.cesiumElement;
     if (!viewer) return;
     drawRunway(viewer, rwEntitiesRef, showSynthetic ? runway : null);
   }, [runway, showSynthetic]);
 
-  // Loop di animazione: a ogni frame estrapola la posizione dell'aereo dal
-  // suo ultimo dato reale (dead reckoning con velocità e prua) e muove la
-  // camera. Così la scena è fluida invece di aggiornarsi a scatti ogni ~15s.
+  // Loop di animazione: avanza la simulazione e muove la camera ogni frame.
   useEffect(() => {
     let disposed = false;
     let remove = null;
-
     function attach() {
       const viewer = viewerRef.current?.cesiumElement;
       if (!viewer || !viewer.scene) {
@@ -307,50 +396,34 @@ export default function FrontalView() {
         return;
       }
       const onFrame = () => {
-        if (!openRef.current) return; // fermo mentre la vista è nascosta
-        const base = baseRef.current;
-        if (!base) return;
-        // Cap a 25s: se i dati si fermano, la camera non "vola via".
-        const elapsed = Math.min((performance.now() - base.t0) / 1000, 25);
-        const distM = (base.vMs || 0) * elapsed;
-        const [lat, lon] = destinationPoint(
-          base.lat,
-          base.lon,
-          base.heading,
-          distM
-        );
-        const altM =
-          base.altM != null ? base.altM + (base.vrate || 0) * elapsed : null;
+        if (!openRef.current) return;
+        const sim = simRef.current;
+        if (!sim) return;
 
-        // Correzione morbida: la posizione mostrata insegue quella target,
-        // così un riallineamento dei dati non produce uno scatto secco.
-        let s = smoothRef.current;
-        if (!s) {
-          s = { lat, lon, altM };
-        } else {
-          const k = 0.12;
-          s.lat += (lat - s.lat) * k;
-          s.lon += (lon - s.lon) * k;
-          s.altM =
-            altM == null ? null : s.altM == null ? altM : s.altM + (altM - s.altM) * k;
-        }
-        smoothRef.current = s;
+        const now = performance.now();
+        let dt = (now - lastFrameRef.current) / 1000;
+        lastFrameRef.current = now;
+        if (dt < 0) dt = 0;
+        if (dt > 0.1) dt = 0.1; // evita salti dopo un frame lungo
+        advanceSim(sim, dt);
 
+        // Mira: in avvicinamento verso la soglia (o prua); a terra lungo la prua.
+        let aim = aimModeRef.current;
+        if (sim.phase === 'rollout' || sim.phase === 'stopped') aim = 'heading';
+        const phaseKey = sim.phase === 'approach' ? 'descent' : 'cruise';
         const pose = computePose(
           {
-            lat: s.lat,
-            lon: s.lon,
-            altM: s.altM,
-            heading: base.heading,
-            phaseKey: base.phaseKey,
+            lat: sim.lat,
+            lon: sim.lon,
+            altM: sim.altM,
+            heading: sim.heading,
+            phaseKey,
           },
           runwayRef.current,
-          aimModeRef.current
+          aim
         );
 
-        // Smoothing anche dell'orientamento: heading/pitch inseguono i valori
-        // target, così un cambio di prua a un nuovo dato non fa ruotare di
-        // scatto la camera.
+        // Smoothing dell'orientamento (rotazione morbida).
         let sp = smoothPoseRef.current;
         if (!sp) {
           sp = { heading: pose.heading, pitch: pose.pitch };
@@ -362,22 +435,27 @@ export default function FrontalView() {
         smoothPoseRef.current = sp;
 
         viewer.camera.setView({
-          destination: Cesium.Cartesian3.fromDegrees(
-            pose.lon,
-            pose.lat,
-            pose.alt
-          ),
+          destination: Cesium.Cartesian3.fromDegrees(pose.lon, pose.lat, pose.alt),
           orientation: {
             heading: Cesium.Math.toRadians(sp.heading),
             pitch: Cesium.Math.toRadians(sp.pitch),
             roll: 0,
           },
         });
+
+        if (now - lastHudRef.current > 200) {
+          lastHudRef.current = now;
+          setSimHud({
+            altM: sim.altM,
+            speedMs: sim.speedMs,
+            vspeed: sim.vspeed,
+            phase: sim.phase,
+          });
+        }
       };
       viewer.scene.preRender.addEventListener(onFrame);
       remove = () => viewer.scene.preRender.removeEventListener(onFrame);
     }
-
     attach();
     return () => {
       disposed = true;
@@ -385,13 +463,28 @@ export default function FrontalView() {
     };
   }, []);
 
-  // Il viewer resta sempre montato (solo nascosto quando chiuso) per non
-  // rimontare Cesium, che ripartiva nero. Gli overlay dipendono dal volo.
-  const phase = flight ? flightPhase(flight) : null;
-  const altFt = flight
-    ? fmt(metersToFeet(flight.geoAltitude ?? flight.baroAltitude))
-    : '—';
   const hasRunway = !!runway;
+  const hud = simHud;
+  const altFt = hud
+    ? fmt(metersToFeet(hud.altM))
+    : flight
+      ? fmt(metersToFeet(flight.geoAltitude ?? flight.baroAltitude))
+      : '—';
+  const spdKt = hud
+    ? fmt(msToKnots(hud.speedMs))
+    : flight
+      ? fmt(msToKnots(flight.velocity))
+      : '—';
+  const vFpm = hud
+    ? fmt(msToFpm(hud.vspeed))
+    : flight
+      ? fmt(msToFpm(flight.verticalRate))
+      : '—';
+  const phaseInfo = hud
+    ? SIM_PHASE[hud.phase]
+    : flight
+      ? { label: flightPhase(flight).label, badge: flightPhase(flight).key }
+      : null;
 
   return (
     <div className={`frontal ${frontalOpen ? '' : 'hidden'}`}>
@@ -419,6 +512,11 @@ export default function FrontalView() {
       </div>
 
       <div className="frontal-topright">
+        {hasRunway && (
+          <button className="btn secondary" onClick={restart} title="Rivedi l'atterraggio dall'inizio">
+            🔄 Riavvia
+          </button>
+        )}
         <button
           className={`btn ${aimMode === 'runway' ? '' : 'secondary'}`}
           disabled={!hasRunway}
@@ -446,45 +544,49 @@ export default function FrontalView() {
       {flight && !hasRunway && (
         <div className="frontal-note">
           Nessuna pista nelle vicinanze: questo aereo è troppo alto o lontano da
-          un aeroporto. Per vedere la pista scegli un aereo in{' '}
-          <b>Salita</b> o <b>Discesa</b> a bassa quota vicino a uno scalo.
+          un aeroporto. Per vedere l'atterraggio scegli un aereo in{' '}
+          <b>Discesa</b> a bassa quota vicino a uno scalo.
         </div>
       )}
 
       {flight && (
-      <div className="frontal-hud">
-        <div className="hud-item">
-          <div className="label">Volo</div>
-          <div className="value">{flight.callsign || flight.icao24}</div>
-        </div>
-        <div className="hud-item">
-          <div className="label">Quota</div>
-          <div className="value">{altFt} ft</div>
-        </div>
-        <div className="hud-item">
-          <div className="label">Velocità</div>
-          <div className="value">{fmt(msToKnots(flight.velocity))} kt</div>
-        </div>
-        <div className="hud-item">
-          <div className="label">Vert.</div>
-          <div className="value">{fmt(msToFpm(flight.verticalRate))} ft/min</div>
-        </div>
-        <div className="hud-item">
-          <div className="label">Fase</div>
-          <div className="value">
-            <span className={`phase-badge ${phase.key}`}>{phase.label}</span>
+        <div className="frontal-hud">
+          <div className="hud-item">
+            <div className="label">Volo</div>
+            <div className="value">{flight.callsign || flight.icao24}</div>
           </div>
-        </div>
-        {hasRunway && (
-          <div className="hud-item runway">
-            <div className="label">Pista {runway.airport}</div>
-            <div className="value">
-              {runway.approachIdent} · {fmt(runway.distanceKm, 1)} km
-              <span className="sub"> · allin. {fmt(runway.alignDeg)}°</span>
+          <div className="hud-item">
+            <div className="label">Quota</div>
+            <div className="value">{altFt} ft</div>
+          </div>
+          <div className="hud-item">
+            <div className="label">Velocità</div>
+            <div className="value">{spdKt} kt</div>
+          </div>
+          <div className="hud-item">
+            <div className="label">Vert.</div>
+            <div className="value">{vFpm} ft/min</div>
+          </div>
+          {phaseInfo && (
+            <div className="hud-item">
+              <div className="label">Fase</div>
+              <div className="value">
+                <span className={`phase-badge ${phaseInfo.badge}`}>
+                  {phaseInfo.label}
+                </span>
+              </div>
             </div>
-          </div>
-        )}
-      </div>
+          )}
+          {hasRunway && (
+            <div className="hud-item runway">
+              <div className="label">Pista {runway.airport}</div>
+              <div className="value">
+                {runway.approachIdent}
+                <span className="sub"> · {runway.leIdent}/{runway.heIdent}</span>
+              </div>
+            </div>
+          )}
+        </div>
       )}
     </div>
   );
