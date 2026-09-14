@@ -79,8 +79,22 @@ src/
   App.jsx
 ```
 
+## Vista 3D (globo)
+
+Il pulsante **🌐 Vista 3D** in basso a destra apre una panoramica su globo
+Cesium con tutti gli aerei visibili:
+
+- **Modellini 3D** (glTF) orientati per prua, a quota reale;
+- **linea al suolo** sotto ogni aereo e **scia** del percorso recente;
+- **edifici 3D** (OSM Buildings) e terreno reale con il token Cesium ion;
+- trascina per ruotare, rotellina per lo zoom, clic su un aereo per i dettagli.
+
+Il modello dell'aereo è `public/models/plane.glb` (Cesium_Air, sample data
+di CesiumGS).
+
 ## Roadmap (prossime fasi)
 
+- [x] Vista 3D globo (modellini, edifici, scie, linee al suolo)
 - [x] Allineare la visuale frontale alle **piste reali** (dataset OurAirports)
 - [ ] Arricchire i dettagli: origine/destinazione, tipo aeromobile, compagnia
 - [ ] Interpolazione fluida delle posizioni tra un update e l'altro

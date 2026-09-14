@@ -97,6 +97,61 @@ body {
   filter: drop-shadow(0 0 6px var(--accent-2));
 }
 
+/* ---- Pulsante Vista 3D ---- */
+.map-3d-btn {
+  position: absolute;
+  bottom: 22px;
+  right: 16px;
+  z-index: 1000;
+  padding: 11px 16px;
+  border-radius: 12px;
+  border: 1px solid var(--accent);
+  background: rgba(19, 28, 46, 0.92);
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  backdrop-filter: blur(6px);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+}
+.map-3d-btn:hover {
+  border-color: var(--accent-2);
+}
+
+/* ---- Panoramica 3D ---- */
+.overview3d {
+  position: absolute;
+  inset: 0;
+  z-index: 1500;
+  background: #000;
+}
+.overview3d.hidden {
+  visibility: hidden;
+  pointer-events: none;
+}
+.overview3d .cesium-container {
+  position: absolute;
+  inset: 0;
+}
+.overview3d .frontal-back {
+  z-index: 1600;
+}
+.overview3d-hint {
+  position: absolute;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1600;
+  background: rgba(11, 17, 32, 0.82);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px 16px;
+  font-size: 12px;
+  color: var(--muted);
+  backdrop-filter: blur(6px);
+  white-space: nowrap;
+}
+
 /* ---- Pannello dettagli ---- */
 .panel {
   position: absolute;
@@ -105,7 +160,7 @@ body {
   bottom: 12px;
   width: 340px;
   max-width: calc(100vw - 24px);
-  z-index: 1000;
+  z-index: 1700;
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 14px;
