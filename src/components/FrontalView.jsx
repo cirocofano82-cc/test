@@ -329,6 +329,22 @@ export default function FrontalView() {
           /* resta il terreno ellissoidale di default */
         }
       })();
+
+      // Attiva il ciclo di rendering SOLO quando il canvas ha una dimensione
+      // reale: disegnare con larghezza 0 fa andare Cesium in errore fatale
+      // ("Expected width to be greater than 0") e ferma il rendering.
+      viewer.useDefaultRenderLoop = false;
+      (function enableWhenSized() {
+        if (disposed) return;
+        const cnv = viewer.scene.canvas;
+        if (cnv.clientWidth > 0 && cnv.clientHeight > 0) {
+          viewer.resize();
+          viewer.useDefaultRenderLoop = openRef.current;
+          viewer.scene.requestRender();
+        } else {
+          requestAnimationFrame(enableWhenSized);
+        }
+      })();
     }
     init();
     return () => {
@@ -421,14 +437,17 @@ export default function FrontalView() {
   };
 
   useEffect(() => {
+    const viewer = viewerRef.current?.cesiumElement;
     if (!frontalOpen) {
       simRef.current = null;
       setSimHud(null);
+      // Ferma il ciclo di rendering mentre la vista è nascosta.
+      if (viewer) viewer.useDefaultRenderLoop = false;
       return;
     }
-    const viewer = viewerRef.current?.cesiumElement;
-    if (viewer) {
+    if (viewer && viewer.scene.canvas.clientWidth > 0) {
       viewer.resize();
+      viewer.useDefaultRenderLoop = true;
       viewer.scene.requestRender();
     }
     const f = flightRef.current;
