@@ -10,7 +10,12 @@ import {
   fmt,
   flightPhase,
 } from '../lib/format';
-import { findApproach, haversineKm, bearing } from '../lib/runways';
+import {
+  findApproach,
+  haversineKm,
+  bearing,
+  destinationPoint,
+} from '../lib/runways';
 
 // Token Cesium ion opzionale: con un token si abilitano terreno e
 // ortofoto satellitari del mondo reale (esperienza molto più realistica).
@@ -107,42 +112,32 @@ function drawRunway(viewer, entitiesRef, runway) {
   entitiesRef.current = [strip, centerline, thr];
 }
 
-// Calcola e applica la posa della camera.
-function updateCamera(viewer, flight, runway, aimMode) {
-  const phase = flightPhase(flight);
+// Calcola la posa della camera per uno stato (posizione/quota/prua) dato.
+// Funzione pura: la usa il loop di animazione a ogni frame.
+function computePose(state, runway, aimMode) {
   const groundElevM = runway ? runway.thr.elevM || 0 : 0;
-  // Quota della camera: quota reale dell'aereo, oppure — se assente (tipico
-  // degli aerei "a terra") — poco sopra l'elevazione della pista, così la
-  // vista è a livello del suolo invece che sospesa in aria.
-  const rawAlt = flight.geoAltitude ?? flight.baroAltitude;
-  const camAltM = rawAlt != null ? rawAlt : groundElevM + 20;
+  const camAltM = state.altM != null ? state.altM : groundElevM + 20;
 
-  let headingDeg = flight.heading ?? 0;
-  let pitchDeg = defaultPitch(camAltM - groundElevM, phase.key);
+  let headingDeg = state.heading ?? 0;
+  let pitchDeg = defaultPitch(camAltM - groundElevM, state.phaseKey);
 
   if (aimMode === 'runway' && runway) {
-    // Punta dalla posizione reale dell'aereo verso la soglia pista.
-    headingDeg = bearing(flight.lat, flight.lon, runway.thr.lat, runway.thr.lon);
+    // Punta dalla posizione (estrapolata) dell'aereo verso la soglia pista.
+    headingDeg = bearing(state.lat, state.lon, runway.thr.lat, runway.thr.lon);
     const horizM =
-      haversineKm(flight.lat, flight.lon, runway.thr.lat, runway.thr.lon) * 1000;
+      haversineKm(state.lat, state.lon, runway.thr.lat, runway.thr.lon) * 1000;
     const aglM = Math.max(camAltM - groundElevM, 8);
     pitchDeg = (-Math.atan2(aglM, Math.max(horizM, 1)) * 180) / Math.PI;
     pitchDeg = Math.max(-60, Math.min(3, pitchDeg));
   }
 
-  viewer.camera.flyTo({
-    destination: Cesium.Cartesian3.fromDegrees(
-      flight.lon,
-      flight.lat,
-      Math.max(camAltM, groundElevM + 15)
-    ),
-    orientation: {
-      heading: Cesium.Math.toRadians(headingDeg),
-      pitch: Cesium.Math.toRadians(pitchDeg),
-      roll: 0,
-    },
-    duration: 1.2,
-  });
+  return {
+    lon: state.lon,
+    lat: state.lat,
+    alt: Math.max(camAltM, groundElevM + 15),
+    heading: headingDeg,
+    pitch: pitchDeg,
+  };
 }
 
 export default function FrontalView() {
@@ -152,6 +147,39 @@ export default function FrontalView() {
   const rwEntitiesRef = useRef([]);
   const [runway, setRunway] = useState(null);
   const [aimMode, setAimMode] = useState('runway'); // 'runway' | 'heading'
+  // Pista "sintetica" (striscia disegnata) disattivata di default: così si
+  // vede la pista reale del satellite. Attivabile col toggle.
+  const [showSynthetic, setShowSynthetic] = useState(false);
+
+  // Refs letti dal loop di animazione (per avere sempre i valori aggiornati
+  // senza ri-registrare il listener a ogni cambio).
+  const baseRef = useRef(null); // stato dell'ultimo dato reale + timestamp
+  const runwayRef = useRef(null);
+  const aimModeRef = useRef(aimMode);
+  useEffect(() => {
+    runwayRef.current = runway;
+  }, [runway]);
+  useEffect(() => {
+    aimModeRef.current = aimMode;
+  }, [aimMode]);
+
+  // A ogni nuovo dato reale aggiorna la "base" da cui estrapolare il moto.
+  useEffect(() => {
+    if (!flight) {
+      baseRef.current = null;
+      return;
+    }
+    baseRef.current = {
+      lat: flight.lat,
+      lon: flight.lon,
+      altM: flight.geoAltitude ?? flight.baroAltitude ?? null,
+      heading: flight.heading ?? 0,
+      vMs: flight.velocity ?? 0, // m/s
+      vrate: flight.verticalRate ?? 0, // m/s
+      phaseKey: flightPhase(flight).key,
+      t0: performance.now(),
+    };
+  }, [flight]);
 
   // Setup iniziale del viewer: imagery + (se disponibile) terreno reale.
   // Attende che il viewer Cesium sia pronto (il ref può non esserlo al primo
@@ -209,19 +237,69 @@ export default function FrontalView() {
     };
   }, [flight]);
 
-  // Disegna/aggiorna la pista rilevata.
+  // Disegna la pista sintetica solo se attivata; altrimenti resta la pista
+  // reale del satellite, senza sovrapposizioni.
   useEffect(() => {
     const viewer = viewerRef.current?.cesiumElement;
     if (!viewer) return;
-    drawRunway(viewer, rwEntitiesRef, runway);
-  }, [runway]);
+    drawRunway(viewer, rwEntitiesRef, showSynthetic ? runway : null);
+  }, [runway, showSynthetic]);
 
-  // Aggiorna la camera al variare di aereo, pista o modalità di mira.
+  // Loop di animazione: a ogni frame estrapola la posizione dell'aereo dal
+  // suo ultimo dato reale (dead reckoning con velocità e prua) e muove la
+  // camera. Così la scena è fluida invece di aggiornarsi a scatti ogni ~15s.
   useEffect(() => {
-    const viewer = viewerRef.current?.cesiumElement;
-    if (!viewer || !flight) return;
-    updateCamera(viewer, flight, runway, aimMode);
-  }, [flight, runway, aimMode]);
+    let disposed = false;
+    let remove = null;
+
+    function attach() {
+      const viewer = viewerRef.current?.cesiumElement;
+      if (!viewer || !viewer.scene) {
+        if (!disposed) requestAnimationFrame(attach);
+        return;
+      }
+      const onFrame = () => {
+        const base = baseRef.current;
+        if (!base) return;
+        const elapsed = (performance.now() - base.t0) / 1000; // secondi
+        const distM = (base.vMs || 0) * elapsed;
+        const [lat, lon] = destinationPoint(
+          base.lat,
+          base.lon,
+          base.heading,
+          distM
+        );
+        const altM =
+          base.altM != null ? base.altM + (base.vrate || 0) * elapsed : null;
+
+        const pose = computePose(
+          { lat, lon, altM, heading: base.heading, phaseKey: base.phaseKey },
+          runwayRef.current,
+          aimModeRef.current
+        );
+        viewer.camera.setView({
+          destination: Cesium.Cartesian3.fromDegrees(
+            pose.lon,
+            pose.lat,
+            pose.alt
+          ),
+          orientation: {
+            heading: Cesium.Math.toRadians(pose.heading),
+            pitch: Cesium.Math.toRadians(pose.pitch),
+            roll: 0,
+          },
+        });
+      };
+      viewer.scene.preRender.addEventListener(onFrame);
+      remove = () => viewer.scene.preRender.removeEventListener(onFrame);
+    }
+
+    attach();
+    return () => {
+      disposed = true;
+      if (remove) remove();
+    };
+  }, []);
 
   if (!flight) return null;
 
@@ -268,6 +346,14 @@ export default function FrontalView() {
           }
         >
           {aimMode === 'runway' && hasRunway ? '🎯 Mira: Pista' : '🧭 Mira: Prua'}
+        </button>
+        <button
+          className={`btn ${showSynthetic ? '' : 'secondary'}`}
+          disabled={!hasRunway}
+          onClick={() => setShowSynthetic((v) => !v)}
+          title="Mostra/nasconde la pista disegnata sopra quella reale"
+        >
+          {showSynthetic ? '▦ Pista 3D: ON' : '▦ Pista 3D: OFF'}
         </button>
       </div>
 

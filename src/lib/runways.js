@@ -46,6 +46,26 @@ export function bearing(lat1, lon1, lat2, lon2) {
   return (((Math.atan2(y, x) * 180) / Math.PI) + 360) % 360;
 }
 
+// Punto di destinazione dato origine, rotta (gradi) e distanza (metri).
+// Usato per estrapolare la posizione dell'aereo tra due aggiornamenti dati.
+export function destinationPoint(lat, lon, bearingDeg, distanceM) {
+  const R = 6371000;
+  const δ = distanceM / R;
+  const θ = toRad(bearingDeg);
+  const φ1 = toRad(lat);
+  const λ1 = toRad(lon);
+  const φ2 = Math.asin(
+    Math.sin(φ1) * Math.cos(δ) + Math.cos(φ1) * Math.sin(δ) * Math.cos(θ)
+  );
+  const λ2 =
+    λ1 +
+    Math.atan2(
+      Math.sin(θ) * Math.sin(δ) * Math.cos(φ1),
+      Math.cos(δ) - Math.sin(φ1) * Math.sin(φ2)
+    );
+  return [(φ2 * 180) / Math.PI, (((λ2 * 180) / Math.PI + 540) % 360) - 180];
+}
+
 // Differenza angolare minima 0..180.
 export function angleDiff(a, b) {
   let d = Math.abs(a - b) % 360;
