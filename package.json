@@ -1,0 +1,26 @@
+{
+  "name": "flightview",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Mappa interattiva di aerei in volo con dettagli del volo e visuale frontale 3D (Cesium)",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "cesium": "^1.121.0",
+    "leaflet": "^1.9.4",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-leaflet": "^4.2.1",
+    "resium": "^1.19.0-beta.1",
+    "zustand": "^4.5.5"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^5.4.11",
+    "vite-plugin-cesium": "^1.2.23"
+  }
+}
