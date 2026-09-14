@@ -30,13 +30,16 @@ function defaultPitch(altM, phaseKey) {
   return Math.max(-45, Math.min(-5, p));
 }
 
-// Imagery: OSM come base (senza chiave) sempre presente; se c'è un token
-// Cesium ion aggiungiamo sopra le ortofoto satellitari del mondo reale.
-// Così qualcosa è sempre visibile, anche se il token manca o non è valido.
+// Imagery: base satellitare Esri (senza chiave, con CORS affidabile) sempre
+// presente — mostra gli aeroporti/piste reali dall'alto. Se c'è un token
+// Cesium ion aggiungiamo sopra le sue ortofoto (di solito più dettagliate).
+// Così qualcosa è sempre visibile anche senza token o con token non valido.
 function setupImagery(viewer) {
   viewer.imageryLayers.addImageryProvider(
-    new Cesium.OpenStreetMapImageryProvider({
-      url: 'https://tile.openstreetmap.org/',
+    new Cesium.UrlTemplateImageryProvider({
+      url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+      maximumLevel: 18,
+      credit: 'Imagery © Esri',
     })
   );
   if (ION_TOKEN) {
@@ -151,30 +154,39 @@ export default function FrontalView() {
   const [aimMode, setAimMode] = useState('runway'); // 'runway' | 'heading'
 
   // Setup iniziale del viewer: imagery + (se disponibile) terreno reale.
+  // Attende che il viewer Cesium sia pronto (il ref può non esserlo al primo
+  // giro di effect) prima di configurare l'imagery.
   useEffect(() => {
-    const viewer = viewerRef.current?.cesiumElement;
-    if (!viewer) return;
     let disposed = false;
 
-    viewer.imageryLayers.removeAll();
-    setupImagery(viewer);
-    // Illuminazione disattivata: con l'ombra notturna il terreno può apparire
-    // scuro/uniforme. Così l'imagery è sempre a piena luminosità.
-    viewer.scene.globe.enableLighting = false;
-    viewer.scene.skyAtmosphere.show = true;
-    // Colore di base del globo mentre i tile caricano (invece del blu oceano).
-    viewer.scene.globe.baseColor = Cesium.Color.fromCssColorString('#2a2f36');
-
-    (async () => {
-      if (!ION_TOKEN) return;
-      try {
-        const terrain = await Cesium.createWorldTerrainAsync();
-        if (!disposed) viewer.terrainProvider = terrain;
-      } catch {
-        /* resta il terreno ellissoidale di default */
+    function init() {
+      const viewer = viewerRef.current?.cesiumElement;
+      if (!viewer || !viewer.scene) {
+        if (!disposed) requestAnimationFrame(init);
+        return;
       }
-    })();
 
+      viewer.imageryLayers.removeAll();
+      setupImagery(viewer);
+      // Illuminazione disattivata: con l'ombra notturna il terreno può
+      // apparire scuro/uniforme. Così l'imagery è sempre a piena luminosità.
+      viewer.scene.globe.enableLighting = false;
+      viewer.scene.skyAtmosphere.show = true;
+      // Colore di base del globo mentre i tile caricano (non blu oceano).
+      viewer.scene.globe.baseColor = Cesium.Color.fromCssColorString('#2a2f36');
+
+      (async () => {
+        if (!ION_TOKEN) return;
+        try {
+          const terrain = await Cesium.createWorldTerrainAsync();
+          if (!disposed) viewer.terrainProvider = terrain;
+        } catch {
+          /* resta il terreno ellissoidale di default */
+        }
+      })();
+    }
+
+    init();
     return () => {
       disposed = true;
     };
