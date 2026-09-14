@@ -155,11 +155,17 @@ const SIM_PHASE = {
   cruise: { label: 'Crociera', badge: 'cruise' },
 };
 
+// Fattore di accelerazione del tempo: a velocità reale un avvicinamento da
+// alcuni km richiede minuti; così l'atterraggio si vede in ~20-30s.
+const SIM_SPEEDUP = 6;
+
 // Costruisce lo stato iniziale della simulazione da uno snapshot dell'aereo.
-// Con pista: avvicinamento con discesa proporzionale alla distanza (atterra
-// esattamente sulla soglia). Senza pista: crociera in linea retta.
+// Con pista: avvicinamento PARAMETRICO dal punto iniziale alla soglia
+// (progressione p: 0→1); posizione e quota interpolate → atterra sempre
+// esattamente sulla pista. Senza pista: crociera in linea retta.
 function makeSim(snapshot, runway) {
-  if (runway) {
+  // La discesa/atterraggio parte solo se l'aereo è in stato "Discesa".
+  if (runway && snapshot.phaseKey === 'descent') {
     const elevM = runway.thr.elevM || 0;
     let startAlt = snapshot.altM;
     if (startAlt == null || startAlt < elevM + 30) startAlt = elevM + 300;
@@ -170,20 +176,30 @@ function makeSim(snapshot, runway) {
         1000,
       300
     );
+    const approachHeading = bearing(
+      snapshot.lat,
+      snapshot.lon,
+      runway.thr.lat,
+      runway.thr.lon
+    );
     return {
       phase: 'approach',
+      startLat: snapshot.lat,
+      startLon: snapshot.lon,
+      thrLat: runway.thr.lat,
+      thrLon: runway.thr.lon,
       lat: snapshot.lat,
       lon: snapshot.lon,
       altM: startAlt,
-      heading: snapshot.heading,
-      speedMs,
-      vspeed: 0,
-      thrLat: runway.thr.lat,
-      thrLon: runway.thr.lon,
-      elevM,
-      headingT: runway.headingT ?? snapshot.heading,
-      startDist,
       startAlt,
+      elevM,
+      startDist,
+      p: 0,
+      speedMs,
+      approachHeading,
+      headingT: runway.headingT ?? approachHeading,
+      heading: approachHeading,
+      vspeed: 0,
     };
   }
   return {
@@ -191,6 +207,7 @@ function makeSim(snapshot, runway) {
     lat: snapshot.lat,
     lon: snapshot.lon,
     altM: snapshot.altM ?? 1500,
+    elevM: 0,
     heading: snapshot.heading,
     speedMs: snapshot.speedMs || 120,
     vspeed: snapshot.vrate || 0,
@@ -202,25 +219,20 @@ function makeSim(snapshot, runway) {
 function advanceSim(sim, dt) {
   const prevAlt = sim.altM;
   if (sim.phase === 'approach') {
-    const step = sim.speedMs * dt;
-    let dist = haversineKm(sim.lat, sim.lon, sim.thrLat, sim.thrLon) * 1000;
-    if (dist <= Math.max(step, 30)) {
-      // Tocca la soglia: touchdown, passa al rullaggio.
+    // Progressione lungo l'avvicinamento: garantisce discesa fino alla pista.
+    sim.p += (sim.speedMs * dt) / sim.startDist;
+    if (sim.p >= 1) {
+      sim.p = 1;
       sim.lat = sim.thrLat;
       sim.lon = sim.thrLon;
       sim.altM = sim.elevM;
       sim.heading = sim.headingT;
       sim.phase = 'rollout';
     } else {
-      const bng = bearing(sim.lat, sim.lon, sim.thrLat, sim.thrLon);
-      sim.heading = lerpAngleDeg(sim.heading, bng, 0.06); // allineamento dolce
-      const [lat, lon] = destinationPoint(sim.lat, sim.lon, sim.heading, step);
-      sim.lat = lat;
-      sim.lon = lon;
-      // Discesa proporzionale alla distanza: quota = elev quando dist = 0.
-      dist = haversineKm(sim.lat, sim.lon, sim.thrLat, sim.thrLon) * 1000;
-      const frac = Math.min(1, Math.max(0, dist / sim.startDist));
-      sim.altM = sim.elevM + (sim.startAlt - sim.elevM) * frac;
+      sim.lat = sim.startLat + (sim.thrLat - sim.startLat) * sim.p;
+      sim.lon = sim.startLon + (sim.thrLon - sim.startLon) * sim.p;
+      sim.altM = sim.startAlt + (sim.elevM - sim.startAlt) * sim.p;
+      sim.heading = sim.approachHeading;
     }
   } else if (sim.phase === 'rollout') {
     sim.heading = lerpAngleDeg(sim.heading, sim.headingT, 0.1);
@@ -367,6 +379,7 @@ export default function FrontalView() {
       heading: f.heading ?? 0,
       speedMs: f.velocity ?? 0,
       vrate: f.verticalRate ?? 0,
+      phaseKey: flightPhase(f).key,
     };
     snapshotRef.current = snapshot;
     return startSim(snapshot);
@@ -405,7 +418,7 @@ export default function FrontalView() {
         lastFrameRef.current = now;
         if (dt < 0) dt = 0;
         if (dt > 0.1) dt = 0.1; // evita salti dopo un frame lungo
-        advanceSim(sim, dt);
+        advanceSim(sim, dt * SIM_SPEEDUP);
 
         // Mira: in avvicinamento verso la soglia (o prua); a terra lungo la prua.
         let aim = aimModeRef.current;
@@ -447,6 +460,7 @@ export default function FrontalView() {
           lastHudRef.current = now;
           setSimHud({
             altM: sim.altM,
+            elevM: sim.elevM || 0,
             speedMs: sim.speedMs,
             vspeed: sim.vspeed,
             phase: sim.phase,
@@ -465,8 +479,9 @@ export default function FrontalView() {
 
   const hasRunway = !!runway;
   const hud = simHud;
+  // In simulazione mostriamo l'altezza sul suolo (AGL): a terra = 0.
   const altFt = hud
-    ? fmt(metersToFeet(hud.altM))
+    ? fmt(metersToFeet(hud.altM - (hud.elevM || 0)))
     : flight
       ? fmt(metersToFeet(flight.geoAltitude ?? flight.baroAltitude))
       : '—';
@@ -546,6 +561,13 @@ export default function FrontalView() {
           Nessuna pista nelle vicinanze: questo aereo è troppo alto o lontano da
           un aeroporto. Per vedere l'atterraggio scegli un aereo in{' '}
           <b>Discesa</b> a bassa quota vicino a uno scalo.
+        </div>
+      )}
+
+      {flight && hasRunway && hud && hud.phase === 'cruise' && (
+        <div className="frontal-note">
+          Aereo non in <b>Discesa</b>: nessun atterraggio simulato. Scegli un
+          aereo in fase di discesa per vedere l'avvicinamento alla pista.
         </div>
       )}
 
