@@ -20,35 +20,32 @@ if (ION_TOKEN) {
   Cesium.Ion.defaultAccessToken = ION_TOKEN;
 }
 
-// Pitch della camera (gradi) in base alla fase di volo quando NON puntiamo
-// una pista specifica.
-function phasePitch(phaseKey) {
-  switch (phaseKey) {
-    case 'descent':
-      return -14;
-    case 'climb':
-      return 3;
-    case 'ground':
-      return -2;
-    default:
-      return -8;
-  }
+// Pitch della camera (gradi) quando NON puntiamo una pista specifica.
+// Più l'aereo è alto, più guardiamo verso il basso per tenere il terreno in
+// vista invece dell'orizzonte vuoto (a bassa quota resta quasi orizzontale).
+function defaultPitch(altM, phaseKey) {
+  const base = Math.min(35, 8 + (altM ?? 300) / 400); // ~ -9° a terra, -34° in crociera
+  let p = -base;
+  if (phaseKey === 'climb') p += 6; // in salita guarda un po' più avanti
+  return Math.max(-45, Math.min(-5, p));
 }
 
-async function setupImagery(viewer) {
-  try {
-    if (ION_TOKEN) {
-      viewer.imageryLayers.add(Cesium.ImageryLayer.fromWorldImagery());
-      return;
-    }
-  } catch {
-    /* fallback sotto */
-  }
+// Imagery: OSM come base (senza chiave) sempre presente; se c'è un token
+// Cesium ion aggiungiamo sopra le ortofoto satellitari del mondo reale.
+// Così qualcosa è sempre visibile, anche se il token manca o non è valido.
+function setupImagery(viewer) {
   viewer.imageryLayers.addImageryProvider(
     new Cesium.OpenStreetMapImageryProvider({
       url: 'https://tile.openstreetmap.org/',
     })
   );
+  if (ION_TOKEN) {
+    try {
+      viewer.imageryLayers.add(Cesium.ImageryLayer.fromWorldImagery());
+    } catch (e) {
+      console.warn('[FlightView] World imagery non disponibile:', e);
+    }
+  }
 }
 
 // Disegna la pista reale (striscia + asse + soglia) sostituendo la precedente.
@@ -112,7 +109,7 @@ function updateCamera(viewer, flight, runway, aimMode) {
   const phase = flightPhase(flight);
   const altM = flight.geoAltitude ?? flight.baroAltitude ?? 300;
   let headingDeg = flight.heading ?? 0;
-  let pitchDeg = phasePitch(phase.key);
+  let pitchDeg = defaultPitch(altM, phase.key);
 
   if (aimMode === 'runway' && runway) {
     // Punta dalla posizione reale dell'aereo verso la soglia pista.
@@ -251,6 +248,14 @@ export default function FrontalView() {
           {aimMode === 'runway' && hasRunway ? '🎯 Mira: Pista' : '🧭 Mira: Prua'}
         </button>
       </div>
+
+      {!hasRunway && (
+        <div className="frontal-note">
+          Nessuna pista nelle vicinanze: questo aereo è troppo alto o lontano da
+          un aeroporto. Per vedere la pista scegli un aereo in{' '}
+          <b>Salita</b> o <b>Discesa</b> a bassa quota vicino a uno scalo.
+        </div>
+      )}
 
       <div className="frontal-hud">
         <div className="hud-item">
