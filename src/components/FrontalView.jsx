@@ -328,6 +328,12 @@ export default function FrontalView() {
         } catch {
           /* resta il terreno ellissoidale di default */
         }
+        try {
+          const buildings = await Cesium.createOsmBuildingsAsync(); // edifici 3D
+          if (!disposed) viewer.scene.primitives.add(buildings);
+        } catch {
+          /* niente edifici 3D */
+        }
       })();
 
       // Attiva il ciclo di rendering SOLO quando il canvas ha una dimensione
