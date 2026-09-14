@@ -107,25 +107,31 @@ function drawRunway(viewer, entitiesRef, runway) {
 // Calcola e applica la posa della camera.
 function updateCamera(viewer, flight, runway, aimMode) {
   const phase = flightPhase(flight);
-  const altM = flight.geoAltitude ?? flight.baroAltitude ?? 300;
+  const groundElevM = runway ? runway.thr.elevM || 0 : 0;
+  // Quota della camera: quota reale dell'aereo, oppure — se assente (tipico
+  // degli aerei "a terra") — poco sopra l'elevazione della pista, così la
+  // vista è a livello del suolo invece che sospesa in aria.
+  const rawAlt = flight.geoAltitude ?? flight.baroAltitude;
+  const camAltM = rawAlt != null ? rawAlt : groundElevM + 20;
+
   let headingDeg = flight.heading ?? 0;
-  let pitchDeg = defaultPitch(altM, phase.key);
+  let pitchDeg = defaultPitch(camAltM - groundElevM, phase.key);
 
   if (aimMode === 'runway' && runway) {
     // Punta dalla posizione reale dell'aereo verso la soglia pista.
     headingDeg = bearing(flight.lat, flight.lon, runway.thr.lat, runway.thr.lon);
     const horizM =
       haversineKm(flight.lat, flight.lon, runway.thr.lat, runway.thr.lon) * 1000;
-    const aglM = Math.max(altM - (runway.thr.elevM || 0), 10);
+    const aglM = Math.max(camAltM - groundElevM, 8);
     pitchDeg = (-Math.atan2(aglM, Math.max(horizM, 1)) * 180) / Math.PI;
-    pitchDeg = Math.max(-60, Math.min(5, pitchDeg));
+    pitchDeg = Math.max(-60, Math.min(3, pitchDeg));
   }
 
   viewer.camera.flyTo({
     destination: Cesium.Cartesian3.fromDegrees(
       flight.lon,
       flight.lat,
-      Math.max(altM, 60)
+      Math.max(camAltM, groundElevM + 15)
     ),
     orientation: {
       heading: Cesium.Math.toRadians(headingDeg),
@@ -152,8 +158,12 @@ export default function FrontalView() {
 
     viewer.imageryLayers.removeAll();
     setupImagery(viewer);
-    viewer.scene.globe.enableLighting = true;
+    // Illuminazione disattivata: con l'ombra notturna il terreno può apparire
+    // scuro/uniforme. Così l'imagery è sempre a piena luminosità.
+    viewer.scene.globe.enableLighting = false;
     viewer.scene.skyAtmosphere.show = true;
+    // Colore di base del globo mentre i tile caricano (invece del blu oceano).
+    viewer.scene.globe.baseColor = Cesium.Color.fromCssColorString('#2a2f36');
 
     (async () => {
       if (!ION_TOKEN) return;
