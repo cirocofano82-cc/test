@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import * as Cesium from 'cesium';
 import { Viewer } from 'resium';
 import 'cesium/Build/Cesium/Widgets/widgets.css';
@@ -10,6 +10,7 @@ import {
   fmt,
   flightPhase,
 } from '../lib/format';
+import { findApproach, haversineKm, bearing } from '../lib/runways';
 
 // Token Cesium ion opzionale: con un token si abilitano terreno e
 // ortofoto satellitari del mondo reale (esperienza molto più realistica).
@@ -19,9 +20,9 @@ if (ION_TOKEN) {
   Cesium.Ion.defaultAccessToken = ION_TOKEN;
 }
 
-// Pitch della camera (gradi) in base alla fase di volo: in avvicinamento
-// guardiamo più in basso per "vedere la pista", in salita più avanti.
-function cameraPitch(phaseKey) {
+// Pitch della camera (gradi) in base alla fase di volo quando NON puntiamo
+// una pista specifica.
+function phasePitch(phaseKey) {
   switch (phaseKey) {
     case 'descent':
       return -14;
@@ -50,10 +51,101 @@ async function setupImagery(viewer) {
   );
 }
 
+// Disegna la pista reale (striscia + asse + soglia) sostituendo la precedente.
+function drawRunway(viewer, entitiesRef, runway) {
+  entitiesRef.current.forEach((e) => viewer.entities.remove(e));
+  entitiesRef.current = [];
+  if (!runway) return;
+
+  const p1 = Cesium.Cartesian3.fromDegrees(runway.a1.lon, runway.a1.lat);
+  const p2 = Cesium.Cartesian3.fromDegrees(runway.a2.lon, runway.a2.lat);
+
+  const strip = viewer.entities.add({
+    corridor: {
+      positions: [p1, p2],
+      width: runway.widthM || 45,
+      material: Cesium.Color.fromCssColorString('#23262d'),
+      cornerType: Cesium.CornerType.MITERED,
+      clampToGround: true,
+    },
+  });
+
+  const centerline = viewer.entities.add({
+    polyline: {
+      positions: [p1, p2],
+      width: 2,
+      clampToGround: true,
+      material: new Cesium.PolylineDashMaterialProperty({
+        color: Cesium.Color.WHITE.withAlpha(0.85),
+        dashLength: 22,
+      }),
+    },
+  });
+
+  const thr = viewer.entities.add({
+    position: Cesium.Cartesian3.fromDegrees(runway.thr.lon, runway.thr.lat),
+    point: {
+      pixelSize: 10,
+      color: Cesium.Color.fromCssColorString('#2bd4a7'),
+      outlineColor: Cesium.Color.BLACK,
+      outlineWidth: 2,
+      heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
+    },
+    label: {
+      text: `RWY ${runway.approachIdent}`,
+      font: 'bold 14px system-ui, sans-serif',
+      pixelOffset: new Cesium.Cartesian2(0, -18),
+      fillColor: Cesium.Color.WHITE,
+      style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+      outlineWidth: 3,
+      outlineColor: Cesium.Color.BLACK,
+      heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
+      disableDepthTestDistance: Number.POSITIVE_INFINITY,
+    },
+  });
+
+  entitiesRef.current = [strip, centerline, thr];
+}
+
+// Calcola e applica la posa della camera.
+function updateCamera(viewer, flight, runway, aimMode) {
+  const phase = flightPhase(flight);
+  const altM = flight.geoAltitude ?? flight.baroAltitude ?? 300;
+  let headingDeg = flight.heading ?? 0;
+  let pitchDeg = phasePitch(phase.key);
+
+  if (aimMode === 'runway' && runway) {
+    // Punta dalla posizione reale dell'aereo verso la soglia pista.
+    headingDeg = bearing(flight.lat, flight.lon, runway.thr.lat, runway.thr.lon);
+    const horizM =
+      haversineKm(flight.lat, flight.lon, runway.thr.lat, runway.thr.lon) * 1000;
+    const aglM = Math.max(altM - (runway.thr.elevM || 0), 10);
+    pitchDeg = (-Math.atan2(aglM, Math.max(horizM, 1)) * 180) / Math.PI;
+    pitchDeg = Math.max(-60, Math.min(5, pitchDeg));
+  }
+
+  viewer.camera.flyTo({
+    destination: Cesium.Cartesian3.fromDegrees(
+      flight.lon,
+      flight.lat,
+      Math.max(altM, 60)
+    ),
+    orientation: {
+      heading: Cesium.Math.toRadians(headingDeg),
+      pitch: Cesium.Math.toRadians(pitchDeg),
+      roll: 0,
+    },
+    duration: 1.2,
+  });
+}
+
 export default function FrontalView() {
   const flight = useSelectedFlight();
   const closeFrontal = useStore((s) => s.closeFrontal);
   const viewerRef = useRef(null);
+  const rwEntitiesRef = useRef([]);
+  const [runway, setRunway] = useState(null);
+  const [aimMode, setAimMode] = useState('runway'); // 'runway' | 'heading'
 
   // Setup iniziale del viewer: imagery + (se disponibile) terreno reale.
   useEffect(() => {
@@ -81,33 +173,42 @@ export default function FrontalView() {
     };
   }, []);
 
-  // Aggiorna la camera quando cambiano i dati dell'aereo (ogni polling).
+  // Rileva la pista in avvicinamento quando cambiano i dati dell'aereo.
+  useEffect(() => {
+    if (!flight) return;
+    let cancelled = false;
+    const altM = flight.geoAltitude ?? flight.baroAltitude ?? null;
+    findApproach(flight.lat, flight.lon, flight.heading, altM)
+      .then((r) => {
+        if (!cancelled) setRunway(r);
+      })
+      .catch(() => {
+        if (!cancelled) setRunway(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [flight]);
+
+  // Disegna/aggiorna la pista rilevata.
+  useEffect(() => {
+    const viewer = viewerRef.current?.cesiumElement;
+    if (!viewer) return;
+    drawRunway(viewer, rwEntitiesRef, runway);
+  }, [runway]);
+
+  // Aggiorna la camera al variare di aereo, pista o modalità di mira.
   useEffect(() => {
     const viewer = viewerRef.current?.cesiumElement;
     if (!viewer || !flight) return;
-
-    const phase = flightPhase(flight);
-    const alt = flight.geoAltitude ?? flight.baroAltitude ?? 300;
-
-    viewer.camera.flyTo({
-      destination: Cesium.Cartesian3.fromDegrees(
-        flight.lon,
-        flight.lat,
-        Math.max(alt, 60)
-      ),
-      orientation: {
-        heading: Cesium.Math.toRadians(flight.heading ?? 0),
-        pitch: Cesium.Math.toRadians(cameraPitch(phase.key)),
-        roll: 0,
-      },
-      duration: 1.2,
-    });
-  }, [flight]);
+    updateCamera(viewer, flight, runway, aimMode);
+  }, [flight, runway, aimMode]);
 
   if (!flight) return null;
 
   const phase = flightPhase(flight);
   const altFt = fmt(metersToFeet(flight.geoAltitude ?? flight.baroAltitude));
+  const hasRunway = !!runway;
 
   return (
     <div className="frontal">
@@ -126,12 +227,28 @@ export default function FrontalView() {
         fullscreenButton={false}
         infoBox={false}
         selectionIndicator={false}
-        creditContainer={undefined}
       />
 
       <div className="frontal-back">
         <button className="btn secondary" onClick={closeFrontal}>
           ← Torna alla mappa
+        </button>
+      </div>
+
+      <div className="frontal-topright">
+        <button
+          className={`btn ${aimMode === 'runway' ? '' : 'secondary'}`}
+          disabled={!hasRunway}
+          onClick={() =>
+            setAimMode((m) => (m === 'runway' ? 'heading' : 'runway'))
+          }
+          title={
+            hasRunway
+              ? 'Alterna tra mira sulla pista e vista lungo la prua'
+              : 'Nessuna pista rilevata nelle vicinanze'
+          }
+        >
+          {aimMode === 'runway' && hasRunway ? '🎯 Mira: Pista' : '🧭 Mira: Prua'}
         </button>
       </div>
 
@@ -158,6 +275,15 @@ export default function FrontalView() {
             <span className={`phase-badge ${phase.key}`}>{phase.label}</span>
           </div>
         </div>
+        {hasRunway && (
+          <div className="hud-item runway">
+            <div className="label">Pista {runway.airport}</div>
+            <div className="value">
+              {runway.approachIdent} · {fmt(runway.distanceKm, 1)} km
+              <span className="sub"> · allin. {fmt(runway.alignDeg)}°</span>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

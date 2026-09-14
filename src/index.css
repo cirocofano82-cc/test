@@ -220,6 +220,26 @@ body {
   left: 16px;
   z-index: 2100;
 }
+.frontal-topright {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  z-index: 2100;
+}
+.frontal-back .btn,
+.frontal-topright .btn {
+  width: auto;
+  padding: 10px 14px;
+}
+.frontal-hud .hud-item.runway {
+  padding-left: 18px;
+  border-left: 1px solid var(--border);
+}
+.frontal-hud .hud-item .value .sub {
+  color: var(--muted);
+  font-weight: 500;
+  font-size: 13px;
+}
 .frontal-hud {
   position: absolute;
   bottom: 20px;
