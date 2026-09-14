@@ -285,6 +285,9 @@ export default function FrontalView() {
   const runwayRef = useRef(null);
   const aimModeRef = useRef(aimMode);
   const openRef = useRef(frontalOpen);
+  // Offset di sguardo controllato dal mouse (trascinamento tasto sinistro):
+  // ruota la visuale rispetto alla direzione di volo, senza fermare la sim.
+  const lookRef = useRef({ yaw: 0, pitch: 0, dragging: false });
 
   useEffect(() => {
     flightRef.current = flight;
@@ -333,11 +336,65 @@ export default function FrontalView() {
     };
   }, []);
 
+  // Controllo mouse: trascinando col tasto sinistro si ruota la visuale
+  // (offset di yaw/pitch aggiunto alla posa calcolata dalla simulazione).
+  // Disabilitiamo il controller di camera di Cesium: la posa la gestiamo noi.
+  useEffect(() => {
+    let disposed = false;
+    let handler = null;
+    function attach() {
+      const viewer = viewerRef.current?.cesiumElement;
+      if (!viewer || !viewer.scene) {
+        if (!disposed) requestAnimationFrame(attach);
+        return;
+      }
+      const c = viewer.scene.screenSpaceCameraController;
+      c.enableRotate = false;
+      c.enableTranslate = false;
+      c.enableZoom = false;
+      c.enableTilt = false;
+      c.enableLook = false;
+
+      const SENS = 0.15; // gradi per pixel
+      handler = new Cesium.ScreenSpaceEventHandler(viewer.scene.canvas);
+      handler.setInputAction(() => {
+        lookRef.current.dragging = true;
+      }, Cesium.ScreenSpaceEventType.LEFT_DOWN);
+      handler.setInputAction(() => {
+        lookRef.current.dragging = false;
+      }, Cesium.ScreenSpaceEventType.LEFT_UP);
+      handler.setInputAction((m) => {
+        if (!lookRef.current.dragging) return;
+        const dx = m.endPosition.x - m.startPosition.x;
+        const dy = m.endPosition.y - m.startPosition.y;
+        lookRef.current.yaw += dx * SENS;
+        lookRef.current.pitch = Math.max(
+          -70,
+          Math.min(70, lookRef.current.pitch - dy * SENS)
+        );
+      }, Cesium.ScreenSpaceEventType.MOUSE_MOVE);
+    }
+    attach();
+
+    // Se il mouse viene rilasciato fuori dal canvas, esci comunque dal drag.
+    const stopDrag = () => {
+      lookRef.current.dragging = false;
+    };
+    window.addEventListener('mouseup', stopDrag);
+
+    return () => {
+      disposed = true;
+      window.removeEventListener('mouseup', stopDrag);
+      if (handler) handler.destroy();
+    };
+  }, []);
+
   // Avvio della simulazione: quando "salgo sull'aereo" (apertura vista),
   // congelo lo stato attuale, rilevo la pista e faccio partire la simulazione
   // autonoma. Da qui in poi NON si usano più dati reali.
   const startSim = (snapshot) => {
     smoothPoseRef.current = null;
+    lookRef.current = { yaw: 0, pitch: 0, dragging: false };
     let cancelled = false;
     findApproach(snapshot.lat, snapshot.lon, snapshot.heading, snapshot.altM)
       .then((rw) => {
@@ -454,11 +511,17 @@ export default function FrontalView() {
         }
         smoothPoseRef.current = sp;
 
+        // Offset di sguardo dell'utente (mouse): ruota la visuale attorno
+        // alla direzione base senza interferire col moto simulato.
+        const look = lookRef.current;
+        const finalHeading = sp.heading + look.yaw;
+        const finalPitch = Math.max(-89, Math.min(45, sp.pitch + look.pitch));
+
         viewer.camera.setView({
           destination: Cesium.Cartesian3.fromDegrees(pose.lon, pose.lat, pose.alt),
           orientation: {
-            heading: Cesium.Math.toRadians(sp.heading),
-            pitch: Cesium.Math.toRadians(sp.pitch),
+            heading: Cesium.Math.toRadians(finalHeading),
+            pitch: Cesium.Math.toRadians(finalPitch),
             roll: 0,
           },
         });
