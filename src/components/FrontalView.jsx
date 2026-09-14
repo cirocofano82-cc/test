@@ -504,7 +504,11 @@ export default function FrontalView() {
         lastFrameRef.current = now;
         if (dt < 0) dt = 0;
         if (dt > 0.1) dt = 0.1; // evita salti dopo un frame lungo
-        advanceSim(sim, dt * SIM_SPEEDUP);
+        // In crociera (es. sorvolo di una città) niente accelerazione tempo:
+        // si indugia sulla scena invece di sfrecciare via. L'accelerazione
+        // serve solo a rendere veloce l'atterraggio.
+        const speedup = sim.phase === 'cruise' ? 1 : SIM_SPEEDUP;
+        advanceSim(sim, dt * speedup);
 
         // Mira: in avvicinamento verso la soglia (o prua); a terra lungo la prua.
         let aim = aimModeRef.current;
@@ -622,11 +626,9 @@ export default function FrontalView() {
       </div>
 
       <div className="frontal-topright">
-        {hasRunway && (
-          <button className="btn secondary" onClick={restart} title="Rivedi l'atterraggio dall'inizio">
-            🔄 Riavvia
-          </button>
-        )}
+        <button className="btn secondary" onClick={restart} title="Riparti dallo stato iniziale">
+          🔄 Riavvia
+        </button>
         <button
           className={`btn ${aimMode === 'runway' ? '' : 'secondary'}`}
           disabled={!hasRunway}
