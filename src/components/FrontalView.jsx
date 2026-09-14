@@ -25,6 +25,13 @@ if (ION_TOKEN) {
   Cesium.Ion.defaultAccessToken = ION_TOKEN;
 }
 
+// Interpolazione tra due angoli in gradi lungo il cammino più breve
+// (gestisce il passaggio 359°→1° senza giri completi).
+function lerpAngleDeg(a, b, k) {
+  let d = ((b - a + 540) % 360) - 180;
+  return a + d * k;
+}
+
 // Pitch della camera (gradi) quando NON puntiamo una pista specifica.
 // Più l'aereo è alto, più guardiamo verso il basso per tenere il terreno in
 // vista invece dell'orizzonte vuoto (a bassa quota resta quasi orizzontale).
@@ -153,16 +160,36 @@ export default function FrontalView() {
 
   // Refs letti dal loop di animazione (per avere sempre i valori aggiornati
   // senza ri-registrare il listener a ogni cambio).
+  const frontalOpen = useStore((s) => s.frontalOpen);
+
   const baseRef = useRef(null); // stato dell'ultimo dato reale + timestamp
   const smoothRef = useRef(null); // posizione mostrata, per correzione morbida
+  const smoothPoseRef = useRef(null); // heading/pitch mostrati, per rotazione morbida
   const runwayRef = useRef(null);
   const aimModeRef = useRef(aimMode);
+  const openRef = useRef(frontalOpen);
   useEffect(() => {
     runwayRef.current = runway;
   }, [runway]);
   useEffect(() => {
     aimModeRef.current = aimMode;
   }, [aimMode]);
+  useEffect(() => {
+    openRef.current = frontalOpen;
+  }, [frontalOpen]);
+
+  // Alla riapertura: ridimensiona il viewer (l'elemento era nascosto) e
+  // azzera lo smoothing così la vista si aggancia subito all'aereo corrente.
+  useEffect(() => {
+    if (!frontalOpen) return;
+    smoothRef.current = null;
+    smoothPoseRef.current = null;
+    const viewer = viewerRef.current?.cesiumElement;
+    if (viewer) {
+      viewer.resize();
+      viewer.scene.requestRender();
+    }
+  }, [frontalOpen]);
 
   // A ogni nuovo dato reale aggiorna la "base" da cui estrapolare il moto.
   // Se il dato è identico al precedente (OpenSky a volte ripete lo stesso
@@ -240,9 +267,10 @@ export default function FrontalView() {
     };
   }, []);
 
-  // Rileva la pista in avvicinamento quando cambiano i dati dell'aereo.
+  // Rileva la pista in avvicinamento quando cambiano i dati dell'aereo
+  // (solo a vista aperta, per non lavorare inutilmente quando è nascosta).
   useEffect(() => {
-    if (!flight) return;
+    if (!flight || !frontalOpen) return;
     let cancelled = false;
     const altM = flight.geoAltitude ?? flight.baroAltitude ?? null;
     findApproach(flight.lat, flight.lon, flight.heading, altM)
@@ -255,7 +283,7 @@ export default function FrontalView() {
     return () => {
       cancelled = true;
     };
-  }, [flight]);
+  }, [flight, frontalOpen]);
 
   // Disegna la pista sintetica solo se attivata; altrimenti resta la pista
   // reale del satellite, senza sovrapposizioni.
@@ -279,6 +307,7 @@ export default function FrontalView() {
         return;
       }
       const onFrame = () => {
+        if (!openRef.current) return; // fermo mentre la vista è nascosta
         const base = baseRef.current;
         if (!base) return;
         // Cap a 25s: se i dati si fermano, la camera non "vola via".
@@ -318,6 +347,20 @@ export default function FrontalView() {
           runwayRef.current,
           aimModeRef.current
         );
+
+        // Smoothing anche dell'orientamento: heading/pitch inseguono i valori
+        // target, così un cambio di prua a un nuovo dato non fa ruotare di
+        // scatto la camera.
+        let sp = smoothPoseRef.current;
+        if (!sp) {
+          sp = { heading: pose.heading, pitch: pose.pitch };
+        } else {
+          const k = 0.1;
+          sp.heading = lerpAngleDeg(sp.heading, pose.heading, k);
+          sp.pitch += (pose.pitch - sp.pitch) * k;
+        }
+        smoothPoseRef.current = sp;
+
         viewer.camera.setView({
           destination: Cesium.Cartesian3.fromDegrees(
             pose.lon,
@@ -325,8 +368,8 @@ export default function FrontalView() {
             pose.alt
           ),
           orientation: {
-            heading: Cesium.Math.toRadians(pose.heading),
-            pitch: Cesium.Math.toRadians(pose.pitch),
+            heading: Cesium.Math.toRadians(sp.heading),
+            pitch: Cesium.Math.toRadians(sp.pitch),
             roll: 0,
           },
         });
@@ -342,14 +385,16 @@ export default function FrontalView() {
     };
   }, []);
 
-  if (!flight) return null;
-
-  const phase = flightPhase(flight);
-  const altFt = fmt(metersToFeet(flight.geoAltitude ?? flight.baroAltitude));
+  // Il viewer resta sempre montato (solo nascosto quando chiuso) per non
+  // rimontare Cesium, che ripartiva nero. Gli overlay dipendono dal volo.
+  const phase = flight ? flightPhase(flight) : null;
+  const altFt = flight
+    ? fmt(metersToFeet(flight.geoAltitude ?? flight.baroAltitude))
+    : '—';
   const hasRunway = !!runway;
 
   return (
-    <div className="frontal">
+    <div className={`frontal ${frontalOpen ? '' : 'hidden'}`}>
       <Viewer
         ref={viewerRef}
         className="cesium-container"
@@ -398,7 +443,7 @@ export default function FrontalView() {
         </button>
       </div>
 
-      {!hasRunway && (
+      {flight && !hasRunway && (
         <div className="frontal-note">
           Nessuna pista nelle vicinanze: questo aereo è troppo alto o lontano da
           un aeroporto. Per vedere la pista scegli un aereo in{' '}
@@ -406,6 +451,7 @@ export default function FrontalView() {
         </div>
       )}
 
+      {flight && (
       <div className="frontal-hud">
         <div className="hud-item">
           <div className="label">Volo</div>
@@ -439,6 +485,7 @@ export default function FrontalView() {
           </div>
         )}
       </div>
+      )}
     </div>
   );
 }

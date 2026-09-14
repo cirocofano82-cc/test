@@ -210,6 +210,13 @@ body {
   z-index: 2000;
   background: #000;
 }
+/* Nascondere senza smontare: il viewer Cesium resta vivo (niente schermo
+   nero alla riapertura). visibility:hidden mantiene la dimensione del canvas;
+   pointer-events:none lascia la mappa sottostante cliccabile. */
+.frontal.hidden {
+  visibility: hidden;
+  pointer-events: none;
+}
 .frontal .cesium-container {
   position: absolute;
   inset: 0;
