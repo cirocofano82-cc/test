@@ -141,7 +141,8 @@ function computePose(state, runway, aimMode) {
   return {
     lon: state.lon,
     lat: state.lat,
-    alt: Math.max(camAltM, groundElevM + 15),
+    // ~4 m di altezza occhio: a terra la vista è sulla pista, non sospesa.
+    alt: Math.max(camAltM, groundElevM + 4),
     heading: headingDeg,
     pitch: pitchDeg,
   };
@@ -313,6 +314,9 @@ export default function FrontalView() {
       viewer.scene.globe.enableLighting = false;
       viewer.scene.skyAtmosphere.show = true;
       viewer.scene.globe.baseColor = Cesium.Color.fromCssColorString('#2a2f36');
+      // Nasconde il disco del sole/luna (il puntino giallo in cielo).
+      if (viewer.scene.sun) viewer.scene.sun.show = false;
+      if (viewer.scene.moon) viewer.scene.moon.show = false;
       (async () => {
         if (!ION_TOKEN) return;
         try {
@@ -422,7 +426,8 @@ export default function FrontalView() {
 
         // Mira: in avvicinamento verso la soglia (o prua); a terra lungo la prua.
         let aim = aimModeRef.current;
-        if (sim.phase === 'rollout' || sim.phase === 'stopped') aim = 'heading';
+        const onGround = sim.phase === 'rollout' || sim.phase === 'stopped';
+        if (onGround) aim = 'heading';
         const phaseKey = sim.phase === 'approach' ? 'descent' : 'cruise';
         const pose = computePose(
           {
@@ -435,6 +440,8 @@ export default function FrontalView() {
           runwayRef.current,
           aim
         );
+        // A terra: vista quasi orizzontale lungo la pista (non inclinata in giù).
+        if (onGround) pose.pitch = -2;
 
         // Smoothing dell'orientamento (rotazione morbida).
         let sp = smoothPoseRef.current;
