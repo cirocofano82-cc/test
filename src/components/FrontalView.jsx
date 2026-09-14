@@ -154,6 +154,7 @@ export default function FrontalView() {
   // Refs letti dal loop di animazione (per avere sempre i valori aggiornati
   // senza ri-registrare il listener a ogni cambio).
   const baseRef = useRef(null); // stato dell'ultimo dato reale + timestamp
+  const smoothRef = useRef(null); // posizione mostrata, per correzione morbida
   const runwayRef = useRef(null);
   const aimModeRef = useRef(aimMode);
   useEffect(() => {
@@ -164,11 +165,29 @@ export default function FrontalView() {
   }, [aimMode]);
 
   // A ogni nuovo dato reale aggiorna la "base" da cui estrapolare il moto.
+  // Se il dato è identico al precedente (OpenSky a volte ripete lo stesso
+  // state vector tra due poll), NON resettiamo: continuiamo a estrapolare
+  // senza far tornare indietro la camera.
   useEffect(() => {
     if (!flight) {
       baseRef.current = null;
+      smoothRef.current = null;
       return;
     }
+    const prev = baseRef.current;
+    const unchanged =
+      prev &&
+      prev.lat === flight.lat &&
+      prev.lon === flight.lon &&
+      prev.timePos === (flight.timePosition ?? null);
+    if (unchanged) return;
+
+    // Cambio aereo o salto grande: azzera lo smoothing per non "planare"
+    // attraverso la mappa da una posizione all'altra.
+    if (prev && haversineKm(prev.lat, prev.lon, flight.lat, flight.lon) > 3) {
+      smoothRef.current = null;
+    }
+
     baseRef.current = {
       lat: flight.lat,
       lon: flight.lon,
@@ -177,6 +196,7 @@ export default function FrontalView() {
       vMs: flight.velocity ?? 0, // m/s
       vrate: flight.verticalRate ?? 0, // m/s
       phaseKey: flightPhase(flight).key,
+      timePos: flight.timePosition ?? null,
       t0: performance.now(),
     };
   }, [flight]);
@@ -261,7 +281,8 @@ export default function FrontalView() {
       const onFrame = () => {
         const base = baseRef.current;
         if (!base) return;
-        const elapsed = (performance.now() - base.t0) / 1000; // secondi
+        // Cap a 25s: se i dati si fermano, la camera non "vola via".
+        const elapsed = Math.min((performance.now() - base.t0) / 1000, 25);
         const distM = (base.vMs || 0) * elapsed;
         const [lat, lon] = destinationPoint(
           base.lat,
@@ -272,8 +293,28 @@ export default function FrontalView() {
         const altM =
           base.altM != null ? base.altM + (base.vrate || 0) * elapsed : null;
 
+        // Correzione morbida: la posizione mostrata insegue quella target,
+        // così un riallineamento dei dati non produce uno scatto secco.
+        let s = smoothRef.current;
+        if (!s) {
+          s = { lat, lon, altM };
+        } else {
+          const k = 0.12;
+          s.lat += (lat - s.lat) * k;
+          s.lon += (lon - s.lon) * k;
+          s.altM =
+            altM == null ? null : s.altM == null ? altM : s.altM + (altM - s.altM) * k;
+        }
+        smoothRef.current = s;
+
         const pose = computePose(
-          { lat, lon, altM, heading: base.heading, phaseKey: base.phaseKey },
+          {
+            lat: s.lat,
+            lon: s.lon,
+            altM: s.altM,
+            heading: base.heading,
+            phaseKey: base.phaseKey,
+          },
           runwayRef.current,
           aimModeRef.current
         );

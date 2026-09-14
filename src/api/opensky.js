@@ -17,6 +17,8 @@ function parseState(s) {
     icao24: s[0],
     callsign: (s[1] || '').trim() || null,
     originCountry: s[2],
+    timePosition: s[3], // unix time dell'ultimo aggiornamento di posizione
+    lastContact: s[4],
     lon: s[5],
     lat: s[6],
     baroAltitude: s[7], // metri
