@@ -7,6 +7,7 @@
   --muted: #8ea0bf;
   --accent: #4aa3ff;
   --accent-2: #2bd4a7;
+  --descent: #ff9f43;
   color-scheme: dark;
 }
 
@@ -88,6 +89,10 @@ body {
   color: var(--accent);
   filter: drop-shadow(0 0 3px rgba(0, 0, 0, 0.6));
   transition: transform 0.3s linear;
+}
+.plane-icon.descent {
+  color: var(--descent);
+  filter: drop-shadow(0 0 4px var(--descent));
 }
 .plane-icon.on-ground {
   color: var(--muted);

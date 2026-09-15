@@ -1,13 +1,15 @@
 import { Marker } from 'react-leaflet';
 import L from 'leaflet';
+import { flightPhase } from '../lib/format';
 
 // Icona aereo come SVG in un divIcon, ruotata secondo l'heading.
 // Il triangolo/silhouette punta verso l'alto a 0°, quindi ruotiamo di `heading`.
-function planeDivIcon(heading, { selected, onGround }) {
+function planeDivIcon(heading, { selected, onGround, descending }) {
   const cls = [
     'plane-icon',
     selected ? 'selected' : '',
     onGround ? 'on-ground' : '',
+    descending ? 'descent' : '',
   ]
     .filter(Boolean)
     .join(' ');
@@ -29,12 +31,18 @@ function planeDivIcon(heading, { selected, onGround }) {
 }
 
 export default function PlaneMarker({ flight, selected, onSelect }) {
+  const descending =
+    flightPhase({
+      onGround: flight.onGround,
+      verticalRate: flight.verticalRate,
+    }).key === 'descent';
   return (
     <Marker
       position={[flight.lat, flight.lon]}
       icon={planeDivIcon(flight.heading, {
         selected,
         onGround: flight.onGround,
+        descending,
       })}
       eventHandlers={{ click: () => onSelect(flight.icao24) }}
       zIndexOffset={selected ? 1000 : 0}
