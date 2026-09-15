@@ -542,14 +542,19 @@ export default function FrontalView() {
         // A terra: vista quasi orizzontale lungo la pista (non inclinata in giù).
         if (onGround) pose.pitch = -2;
 
-        // Smoothing dell'orientamento (rotazione morbida).
+        // Smoothing di orientamento (rotazione morbida) e quota. La quota è
+        // ammorbidita così al touchdown la discesa non si arresta di scatto:
+        // la camera insegue la quota con un piccolo ritardo e vi si adagia,
+        // eliminando lo "scatto" verticale al contatto senza allontanarsi
+        // dalla pista (la quota d'arrivo resta la stessa, ~4 m dall'asfalto).
         let sp = smoothPoseRef.current;
         if (!sp) {
-          sp = { heading: pose.heading, pitch: pose.pitch };
+          sp = { heading: pose.heading, pitch: pose.pitch, alt: pose.alt };
         } else {
           const k = 0.1;
           sp.heading = lerpAngleDeg(sp.heading, pose.heading, k);
           sp.pitch += (pose.pitch - sp.pitch) * k;
+          sp.alt += (pose.alt - sp.alt) * k;
         }
         smoothPoseRef.current = sp;
 
@@ -565,7 +570,7 @@ export default function FrontalView() {
         }
 
         viewer.camera.setView({
-          destination: Cesium.Cartesian3.fromDegrees(pose.lon, pose.lat, pose.alt),
+          destination: Cesium.Cartesian3.fromDegrees(pose.lon, pose.lat, sp.alt),
           orientation: {
             heading: Cesium.Math.toRadians(finalHeading),
             pitch: Cesium.Math.toRadians(finalPitch),
