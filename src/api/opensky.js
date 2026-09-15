@@ -12,6 +12,28 @@
 // in produzione si chiama direttamente l'API pubblica.
 const BASE = import.meta.env.DEV ? '/osky' : 'https://opensky-network.org/api';
 
+// Errore tipizzato per le risposte non-OK di OpenSky. Porta con sé lo status
+// HTTP e (per il 429) i secondi di attesa suggeriti dall'header Retry-After,
+// così il polling può applicare un backoff invece di martellare l'API.
+export class OpenSkyError extends Error {
+  constructor(status, statusText, retryAfterSec = null) {
+    super(`OpenSky ${status}: ${statusText}`);
+    this.name = 'OpenSkyError';
+    this.status = status;
+    this.retryAfterSec = retryAfterSec;
+  }
+}
+
+// Retry-After può essere un numero di secondi oppure una data HTTP.
+function parseRetryAfter(value) {
+  if (!value) return null;
+  const secs = Number(value);
+  if (Number.isFinite(secs)) return Math.max(0, secs);
+  const when = Date.parse(value);
+  if (!Number.isNaN(when)) return Math.max(0, Math.round((when - Date.now()) / 1000));
+  return null;
+}
+
 function parseState(s) {
   return {
     icao24: s[0],
@@ -46,7 +68,9 @@ export async function fetchStatesInBBox(bbox, signal) {
   });
   const res = await fetch(`${BASE}/states/all?${params}`, { signal });
   if (!res.ok) {
-    throw new Error(`OpenSky ${res.status}: ${res.statusText}`);
+    const retryAfter =
+      res.status === 429 ? parseRetryAfter(res.headers.get('Retry-After')) : null;
+    throw new OpenSkyError(res.status, res.statusText, retryAfter);
   }
   const data = await res.json();
   const states = Array.isArray(data.states) ? data.states : [];
