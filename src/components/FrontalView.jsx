@@ -542,6 +542,21 @@ export default function FrontalView() {
         // A terra: vista quasi orizzontale lungo la pista (non inclinata in giù).
         if (onGround) pose.pitch = -2;
 
+        // Flare: negli ultimi metri dell'avvicinamento allinea gradualmente la
+        // camera all'asse pista e raddrizza il pitch verso l'assetto di
+        // touchdown. Senza questo, nell'ultimo tratto la distanza dalla soglia
+        // tende a zero, il pitch pica fino a -60° e l'heading scatta all'asse
+        // pista: al contatto si vedeva un "salto". Fondendo verso i valori del
+        // rollout il passaggio approach → rollout diventa continuo.
+        if (sim.phase === 'approach') {
+          const flare = Math.min(1, Math.max(0, (sim.p - 0.85) / 0.15));
+          if (flare > 0) {
+            const hT = sim.headingT ?? pose.heading;
+            pose.heading = lerpAngleDeg(pose.heading, hT, flare);
+            pose.pitch += (-2 - pose.pitch) * flare;
+          }
+        }
+
         // Smoothing dell'orientamento (rotazione morbida).
         let sp = smoothPoseRef.current;
         if (!sp) {
